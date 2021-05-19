@@ -1,20 +1,21 @@
-import 'module-alias/register';
-import { JSONRPCClient } from 'json-rpc-2.0';
-import { ethers } from 'ethers';
-import fetch from 'node-fetch/index';
-import { Config } from '../../packages/config';
-import { ForceBridgeCore } from '../../packages/core';
-import { IndexerCollector } from '../../packages/ckb/tx-helper/collector';
-import { CkbIndexer } from '../../packages/ckb/tx-helper/indexer';
+import { Config } from '@force-bridge/x/dist/config';
+import { ForceBridgeCore } from '@force-bridge/x/dist/core';
+import { CkbIndexer } from '@force-bridge/x/dist/ckb/tx-helper/indexer';
+import { IndexerCollector } from '@force-bridge/x/dist/ckb/tx-helper/collector';
 import nconf from 'nconf';
-import { asyncSleep } from '@force-bridge/utils';
-import { initLog, logger } from '@force-bridge/utils/logger';
-import { EthAsset } from '@force-bridge/ckb/model/asset';
+import { asyncSleep } from '@force-bridge/x/dist/utils';
+import { initLog, logger } from '@force-bridge/x/dist/utils/logger';
+import { EthAsset } from '@force-bridge/x/dist/ckb/model/asset';
+
+import { ethers } from 'ethers';
+import { JSONRPCClient } from 'json-rpc-2.0';
+import fetch from 'node-fetch/index';
+
 import { Script, Amount } from '@lay2/pw-core';
 import CKB from '@nervosnetwork/ckb-sdk-core/';
 import { AddressPrefix } from '@nervosnetwork/ckb-sdk-utils';
 
-const BATCH_NUM = 10;
+const BATCH_NUM = 2;
 
 const FORCE_BRIDGE_URL = 'http://47.56.233.149:3080/force-bridge/api/v1';
 
@@ -27,8 +28,8 @@ const ERC20_TOKEN_ADDRESS = '0x7Af456bf0065aADAB2E6BEc6DaD3731899550b84';
 
 const CKB_NODE_URL = 'https://testnet.ckbapp.dev';
 const CKB_INDEXER_URL = 'https://testnet.ckbapp.dev/indexer';
-const RICH_CKB_PRI_KEY = '0xd731ef492a844d401a1e9cb57b53aeaf840c80bd8acbd8c99b5240b2742e000e';
-
+const RICH_CKB_PRI_KEY = '0x9c65211cb1f4b62fa557eae748a92ec5355f717d7e28587ca269b80ba63c72c4';
+//0x9c65211cb1f4b62fa557eae748a92ec5355f717d7e28587ca269b80ba63c72c4
 const ckb = new CKB(CKB_NODE_URL);
 
 // JSONRPCClient needs to know how to send a JSON-RPC request.
@@ -179,29 +180,47 @@ async function check(token_address, txId, address) {
 //   return balance;
 // }
 
-async function execute(token_address, privateKeys, ckbAddresses) {
-  const lockTxs = [];
+async function execute(privateKeys, ckbAddresses) {
+  const lockETHTxs = [];
+  const lockERC20Txs = [];
+
   const provider = new ethers.providers.JsonRpcProvider(ETH_NODE_URL);
+  const richWallet = new ethers.Wallet(RICH_ETH_WALLET_PRIV, provider);
+  const richNonce = await richWallet.getTransactionCount();
   for (let i = 0; i < BATCH_NUM; i++) {
+    //general wallet lock eth
     const wallet = new ethers.Wallet(privateKeys[i], provider);
     const nonce = await wallet.getTransactionCount();
-    const lockTxHash = await lock(wallet, token_address, nonce, ckbAddresses[i]);
-    lockTxs.push(lockTxHash);
-  }
-  logger.info('lock txs', lockTxs);
-  for (let i = 0; i < BATCH_NUM; i++) {
-    await check(token_address, lockTxs[i], ckbAddresses[i]);
-  }
+    const lockETHTxHash = await lock(wallet, ETH_TOKEN_ADDRESS, nonce, ckbAddresses[i]);
 
-  const burnTxs = [];
-  for (let i = 0; i < BATCH_NUM; i++) {
-    const burnTxHash = await burn(token_address, privateKeys[i], ckbAddresses[i]);
-    burnTxs.push(burnTxHash);
+    //rich wallet lock erc20
+    const lockERC20TxHash = await lock(richWallet, ERC20_TOKEN_ADDRESS, richNonce + i, ckbAddresses[i + BATCH_NUM]);
+
+    lockETHTxs.push(lockETHTxHash);
+    lockERC20Txs.push(lockERC20TxHash);
   }
-  logger.info('burn txs', burnTxs);
+  logger.info('lock eth txs', lockETHTxs);
+  logger.info('lock erc20 txs', lockERC20Txs);
 
   for (let i = 0; i < BATCH_NUM; i++) {
-    await check(token_address, burnTxs[i], ckbAddresses[i]);
+    await check(ETH_TOKEN_ADDRESS, lockETHTxs[i], ckbAddresses[i]);
+    await check(ERC20_TOKEN_ADDRESS, lockERC20Txs[i], ckbAddresses[i + BATCH_NUM]);
+  }
+
+  const burnETHTxs = [];
+  const burnERC20Txs = [];
+  for (let i = 0; i < BATCH_NUM; i++) {
+    const burnTxHash = await burn(ETH_TOKEN_ADDRESS, privateKeys[i], ckbAddresses[i]);
+    const burnERC20TxHash = await burn(ERC20_TOKEN_ADDRESS, privateKeys[i + BATCH_NUM], ckbAddresses[i + BATCH_NUM]);
+    burnETHTxs.push(burnTxHash);
+    burnERC20Txs.push(burnERC20TxHash);
+  }
+  logger.info('burn eth txs', burnETHTxs);
+  logger.info('burn erc20 txs', burnERC20Txs);
+
+  for (let i = 0; i < BATCH_NUM; i++) {
+    await check(ETH_TOKEN_ADDRESS, burnETHTxs[i], ckbAddresses[i]);
+    await check(ERC20_TOKEN_ADDRESS, burnERC20Txs[i], ckbAddresses[i + BATCH_NUM]);
   }
 }
 
@@ -319,27 +338,27 @@ async function main() {
   config.common.log.logFile = './log/rpc-ci.log';
   initLog(config.common.log);
 
-  logger.info('123');
-  logger.debug('123');
   // const privateKeys = preparePrivateKeys();
   // console.log('priv', privateKeys);
   // const addresses = getCkbAddresses(privateKeys);
   // console.log('address', addresses);
-  // await prepareEthAddresses(privateKeys);
   // await prepareCkbAddresses(privateKeys);
+  // await prepareEthAddresses(privateKeys);
 
   const privPath = './batch_privs.json';
   nconf.env().file({ file: privPath });
 
   const privateKeys = nconf.get('privs');
-  logger.info('private keys', privateKeys);
   const addresses = getCkbAddresses(privateKeys);
+  logger.info('ckb addresses ', addresses);
 
-  try {
-    await execute(ETH_TOKEN_ADDRESS, privateKeys, addresses);
-  } catch (e) {
-    logger.info('catch error', e);
-  }
+  const burnTxHash = await burn(ETH_TOKEN_ADDRESS, privateKeys[0], 'ckt1qyqg8rnemnhee0upnge80ryvlnyphvj424ssk7yy24');
+
+  // try {
+  //   await execute(privateKeys, addresses);
+  // } catch (e) {
+  //   logger.info('catch error', e);
+  // }
 }
 
 main();
