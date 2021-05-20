@@ -15,7 +15,7 @@ import { Script, Amount } from '@lay2/pw-core';
 import CKB from '@nervosnetwork/ckb-sdk-core/';
 import { AddressPrefix } from '@nervosnetwork/ckb-sdk-utils';
 
-const BATCH_NUM = 2;
+const BATCH_NUM = 25;
 
 const FORCE_BRIDGE_URL = 'http://47.56.233.149:3080/force-bridge/api/v1';
 
@@ -352,13 +352,11 @@ async function main() {
   const addresses = getCkbAddresses(privateKeys);
   logger.info('ckb addresses ', addresses);
 
-  const burnTxHash = await burn(ETH_TOKEN_ADDRESS, privateKeys[0], 'ckt1qyqg8rnemnhee0upnge80ryvlnyphvj424ssk7yy24');
-
-  // try {
-  //   await execute(privateKeys, addresses);
-  // } catch (e) {
-  //   logger.info('catch error', e);
-  // }
+  try {
+    await execute(privateKeys, addresses);
+  } catch (e) {
+    logger.info('catch error', e);
+  }
 }
 
 main();
