@@ -15,7 +15,8 @@ import { Script, Amount } from '@lay2/pw-core';
 import CKB from '@nervosnetwork/ckb-sdk-core/';
 import { AddressPrefix } from '@nervosnetwork/ckb-sdk-utils';
 
-const BATCH_NUM = 25;
+const BATCH_NUM = 30;
+const LOOP = 4;
 
 const FORCE_BRIDGE_URL = 'http://47.56.233.149:3080/force-bridge/api/v1';
 
@@ -28,9 +29,26 @@ const ERC20_TOKEN_ADDRESS = '0x7Af456bf0065aADAB2E6BEc6DaD3731899550b84';
 
 const CKB_NODE_URL = 'https://testnet.ckbapp.dev';
 const CKB_INDEXER_URL = 'https://testnet.ckbapp.dev/indexer';
-const RICH_CKB_PRI_KEY = '0x9c65211cb1f4b62fa557eae748a92ec5355f717d7e28587ca269b80ba63c72c4';
-//0x9c65211cb1f4b62fa557eae748a92ec5355f717d7e28587ca269b80ba63c72c4
+const RICH_CKB_PRI_KEY = '0x3063a762ae90f50c83e8d4ef660cbf178acfa1658af59c1df088b6dac75358f3';
+
 const ckb = new CKB(CKB_NODE_URL);
+
+const ethClient = new JSONRPCClient((jsonRPCRequest) =>
+  fetch('https://rinkeby.infura.io/v3/48be8feb3f9c46c397ceae02a0dbc7ae', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(jsonRPCRequest),
+  }).then((response) => {
+    if (response.status === 200) {
+      // Use client.receive when you received a JSON-RPC response.
+      return response.json().then((jsonRPCResponse) => client.receive(jsonRPCResponse));
+    } else if (jsonRPCRequest.id !== undefined) {
+      return Promise.reject(new Error(response.statusText));
+    }
+  }),
+);
 
 // JSONRPCClient needs to know how to send a JSON-RPC request.
 // Tell it by passing a function to its constructor. The function must take a JSON-RPC request and send it.
@@ -77,9 +95,8 @@ async function lock(ethWallet, token_address, nonce, ckbRecipientAddress) {
   const signedTx = await ethWallet.signTransaction(unsignedTx);
   logger.info('signedTx', signedTx);
 
-  const lockTxHash = (await provider.sendTransaction(signedTx)).hash;
-  logger.info('lockTxHash', lockTxHash);
-  return lockTxHash;
+  const hexTx = await Promise.resolve(signedTx).then((t) => ethers.utils.hexlify(t));
+  return hexTx;
 }
 
 async function getTransaction(token_address, address) {
@@ -111,16 +128,13 @@ async function burn(token_address, priv, address) {
   const signedTx = ckb.signTransaction(priv)(unsignedBurnTx.rawTransaction);
   logger.info('signedTx', signedTx);
 
-  const burnTxHash = await ckb.rpc.sendTransaction(signedTx);
-  logger.info('burnTxHash', burnTxHash);
-  return burnTxHash;
+  return signedTx;
 }
 
 async function check(token_address, txId, address) {
   let find = false;
   let pending = false;
   for (let i = 0; i < 2000; i++) {
-    await asyncSleep(3000);
     const txs = await getTransaction(token_address, address);
     for (const tx of txs) {
       if (tx.txSummary.fromTransaction.txId == txId) {
@@ -141,6 +155,7 @@ async function check(token_address, txId, address) {
     if (find) {
       break;
     }
+    await asyncSleep(3000);
   }
   if (pending) {
     throw new Error(`rpc test failed, pending for 3000s ${txId}`);
@@ -180,47 +195,92 @@ async function check(token_address, txId, address) {
 //   return balance;
 // }
 
-async function execute(privateKeys, ckbAddresses) {
+async function execute(ethPrivateKeys, ckbPrivateKeys, ckbAddresses) {
   const lockETHTxs = [];
   const lockERC20Txs = [];
-
+  const signedLockETHTxs = [];
+  const signedLockERC20Txs = [];
   const provider = new ethers.providers.JsonRpcProvider(ETH_NODE_URL);
   const richWallet = new ethers.Wallet(RICH_ETH_WALLET_PRIV, provider);
   const richNonce = await richWallet.getTransactionCount();
   for (let i = 0; i < BATCH_NUM; i++) {
-    //general wallet lock eth
-    const wallet = new ethers.Wallet(privateKeys[i], provider);
+    const wallet = new ethers.Wallet(ethPrivateKeys[i], provider);
     const nonce = await wallet.getTransactionCount();
-    const lockETHTxHash = await lock(wallet, ETH_TOKEN_ADDRESS, nonce, ckbAddresses[i]);
-
-    //rich wallet lock erc20
-    const lockERC20TxHash = await lock(richWallet, ERC20_TOKEN_ADDRESS, richNonce + i, ckbAddresses[i + BATCH_NUM]);
-
-    lockETHTxs.push(lockETHTxHash);
-    lockERC20Txs.push(lockERC20TxHash);
+    for (let j = 0; j < LOOP; j++) {
+      //general wallet lock eth
+      const signedLockETHTx = await lock(wallet, ETH_TOKEN_ADDRESS, nonce + j, ckbAddresses[LOOP * i + j]);
+      //rich wallet lock erc20
+      const signedLockERC20Tx = await lock(
+        richWallet,
+        ERC20_TOKEN_ADDRESS,
+        richNonce + LOOP * i + j,
+        ckbAddresses[LOOP * i + j + BATCH_NUM * LOOP],
+      );
+      signedLockETHTxs.push(signedLockETHTx);
+      signedLockERC20Txs.push(signedLockERC20Tx);
+    }
+  }
+  // for (let i = 0; i < BATCH_NUM; i++) {
+  //   for (let j = 0; j < LOOP; j++) {
+  //     //ethClient.request('eth_sendRawTransaction', signedLockETHTxs);
+  //     provider.send('eth_sendRawTransaction', [signedLockETHTxs[LOOP * i + j]]);
+  //     provider.send('eth_sendRawTransaction', [signedLockERC20Txs[LOOP * i + j]]);
+  //   }
+  // }
+  for (let i = 0; i < BATCH_NUM; i++) {
+    for (let j = 0; j < LOOP; j++) {
+      const lockETHTxHash = (await provider.sendTransaction(signedLockETHTxs[LOOP * i + j])).hash;
+      const lockERC20TxHash = (await provider.sendTransaction(signedLockERC20Txs[LOOP * i + j])).hash;
+      lockETHTxs.push(lockETHTxHash);
+      lockERC20Txs.push(lockERC20TxHash);
+    }
   }
   logger.info('lock eth txs', lockETHTxs);
   logger.info('lock erc20 txs', lockERC20Txs);
-
   for (let i = 0; i < BATCH_NUM; i++) {
-    await check(ETH_TOKEN_ADDRESS, lockETHTxs[i], ckbAddresses[i]);
-    await check(ERC20_TOKEN_ADDRESS, lockERC20Txs[i], ckbAddresses[i + BATCH_NUM]);
+    for (let j = 0; j < LOOP; j++) {
+      await check(ETH_TOKEN_ADDRESS, lockETHTxs[LOOP * i + j], ckbAddresses[LOOP * i + j]);
+      await check(ERC20_TOKEN_ADDRESS, lockERC20Txs[LOOP * i + j], ckbAddresses[LOOP * i + j + LOOP * BATCH_NUM]);
+    }
   }
 
   const burnETHTxs = [];
   const burnERC20Txs = [];
+  const signedBurnETHTxs = [];
+  const signedBurnERC20Txs = [];
   for (let i = 0; i < BATCH_NUM; i++) {
-    const burnTxHash = await burn(ETH_TOKEN_ADDRESS, privateKeys[i], ckbAddresses[i]);
-    const burnERC20TxHash = await burn(ERC20_TOKEN_ADDRESS, privateKeys[i + BATCH_NUM], ckbAddresses[i + BATCH_NUM]);
-    burnETHTxs.push(burnTxHash);
-    burnERC20Txs.push(burnERC20TxHash);
+    for (let j = 0; j < LOOP; j++) {
+      const burnETHTx = await burn(ETH_TOKEN_ADDRESS, ckbPrivateKeys[LOOP * i + j], ckbAddresses[LOOP * i + j]);
+      const burnERC20Tx = await burn(
+        ERC20_TOKEN_ADDRESS,
+        ckbPrivateKeys[LOOP * i + j + LOOP * BATCH_NUM],
+        ckbAddresses[LOOP * i + j + LOOP * BATCH_NUM],
+      );
+      signedBurnETHTxs.push(burnETHTx);
+      signedBurnERC20Txs.push(burnERC20Tx);
+    }
+  }
+  // for (let i = 0; i < BATCH_NUM; i++) {
+  //   for (let j = 0; j < LOOP; j++) {
+  //     ckb.rpc.sendTransaction(signedBurnETHTxs[LOOP * i + j]);
+  //     ckb.rpc.sendTransaction(signedBurnERC20Txs[LOOP * i + j]);
+  //   }
+  // }
+  for (let i = 0; i < BATCH_NUM; i++) {
+    for (let j = 0; j < LOOP; j++) {
+      const burnETHTxHash = await ckb.rpc.sendTransaction(signedBurnETHTxs[LOOP * i + j]);
+      const burnERC20TxHash = await ckb.rpc.sendTransaction(signedBurnERC20Txs[LOOP * i + j]);
+      burnETHTxs.push(burnETHTxHash);
+      burnERC20Txs.push(burnERC20TxHash);
+    }
   }
   logger.info('burn eth txs', burnETHTxs);
   logger.info('burn erc20 txs', burnERC20Txs);
-
   for (let i = 0; i < BATCH_NUM; i++) {
-    await check(ETH_TOKEN_ADDRESS, burnETHTxs[i], ckbAddresses[i]);
-    await check(ERC20_TOKEN_ADDRESS, burnERC20Txs[i], ckbAddresses[i + BATCH_NUM]);
+    for (let j = 0; j < LOOP; j++) {
+      await check(ETH_TOKEN_ADDRESS, burnETHTxs[LOOP * i + j], ckbAddresses[LOOP * i + j]);
+      await check(ERC20_TOKEN_ADDRESS, burnERC20Txs[LOOP * i + j], ckbAddresses[LOOP * i + j + LOOP * BATCH_NUM]);
+    }
   }
 }
 
@@ -343,17 +403,20 @@ async function main() {
   // const addresses = getCkbAddresses(privateKeys);
   // console.log('address', addresses);
   // await prepareCkbAddresses(privateKeys);
-  // await prepareEthAddresses(privateKeys);
+  //await prepareEthAddresses(privateKeys);
 
-  const privPath = './batch_privs.json';
-  nconf.env().file({ file: privPath });
+  const ethPrivPath = './eth_privs.json';
+  nconf.env().file({ file: ethPrivPath });
+  const ethPrivateKeys = nconf.get('privs');
 
-  const privateKeys = nconf.get('privs');
-  const addresses = getCkbAddresses(privateKeys);
-  logger.info('ckb addresses ', addresses);
+  const ckbPrivPath = './ckb_privs.json';
+  nconf.env().file({ file: ckbPrivPath });
+  const ckbPrivateKeys = nconf.get('privs');
+  const ckbAddresses = getCkbAddresses(ckbPrivateKeys);
+  logger.info('ckb addresses ', ckbAddresses);
 
   try {
-    await execute(privateKeys, addresses);
+    await execute(ethPrivateKeys, ckbPrivateKeys, ckbAddresses);
   } catch (e) {
     logger.info('catch error', e);
   }
