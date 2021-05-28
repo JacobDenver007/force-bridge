@@ -14,11 +14,12 @@ import fetch from 'node-fetch/index';
 import { Script, Amount } from '@lay2/pw-core';
 import CKB from '@nervosnetwork/ckb-sdk-core/';
 import { AddressPrefix } from '@nervosnetwork/ckb-sdk-utils';
+import { ETH_ADDRESS } from 'packages/x/dist/xchain/eth';
 
 const BATCH_NUM = 30;
 const LOOP = 4;
 
-const FORCE_BRIDGE_URL = 'http://47.56.233.149:3080/force-bridge/api/v1';
+const FORCE_BRIDGE_URL = 'http://47.56.233.149:3083/force-bridge/api/v1';
 
 const ETH_NODE_URL = 'https://rinkeby.infura.io/v3/48be8feb3f9c46c397ceae02a0dbc7ae';
 const RICH_ETH_WALLET_PRIV = '0x49740e7b29259e7c2b693f365a9fd581cef75d1e346c8dff89ec037cdfd9f89d';
@@ -76,7 +77,7 @@ async function lock(ethWallet, token_address, nonce, ckbRecipientAddress) {
     asset: {
       network: 'Ethereum',
       ident: token_address,
-      amount: '1',
+      amount: '2000000000000000',
     },
   };
   const unsignedLockTx = await client.request('generateBridgeInNervosTransaction', lockPayload);
@@ -120,7 +121,7 @@ async function burn(token_address, priv, address) {
     sender: address,
     recipient: RICH_ETH_SENDER,
     asset: token_address,
-    amount: '1',
+    amount: '1000000000000000',
   };
   const unsignedBurnTx = await client.request('generateBridgeOutNervosTransaction', burnPayload);
   logger.info('unsignedBurnTx ', unsignedBurnTx);
