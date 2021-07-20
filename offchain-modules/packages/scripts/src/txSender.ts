@@ -13,18 +13,21 @@ async function main() {
   const CKB_INDEXER_URL = getFromEnv('CKB_INDEXER_URL');
   const CKB_TEST_PRIVKEY = getFromEnv('CKB_TEST_PRIVKEY');
   const ETH_TEST_PRIVKEY = getFromEnv('ETH_TEST_PRIVKEY');
+  const TEST_KEY_PATH = getFromEnv('TEST_KEY_PATH');
   logger.info('start batch test');
-  for (;;) {
-    await ethBatchTest(
-      ETH_TEST_PRIVKEY,
-      CKB_TEST_PRIVKEY,
-      ETH_RPC_URL,
-      CKB_RPC_URL,
-      CKB_INDEXER_URL,
-      FORCE_BRIDGE_URL,
-      10,
-    );
-  }
+  await ethBatchTest(
+    ETH_TEST_PRIVKEY,
+    CKB_TEST_PRIVKEY,
+    ETH_RPC_URL,
+    CKB_RPC_URL,
+    CKB_INDEXER_URL,
+    FORCE_BRIDGE_URL,
+    TEST_KEY_PATH,
+    true,
+    true,
+    false,
+    10,
+  );
 }
 
 main()

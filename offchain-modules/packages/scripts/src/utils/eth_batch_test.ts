@@ -1,7 +1,9 @@
+import fs from 'fs';
+
 import { IndexerCollector } from '@force-bridge/x/dist/ckb/tx-helper/collector';
 import { CkbIndexer } from '@force-bridge/x/dist/ckb/tx-helper/indexer';
 import { asserts } from '@force-bridge/x/dist/errors';
-import { asyncSleep } from '@force-bridge/x/dist/utils';
+import { asyncSleep, writeJsonToFile } from '@force-bridge/x/dist/utils';
 import { logger } from '@force-bridge/x/dist/utils/logger';
 import { Script } from '@lay2/pw-core';
 import CKB from '@nervosnetwork/ckb-sdk-core';
@@ -10,14 +12,21 @@ import { ethers } from 'ethers';
 import { JSONRPCClient } from 'json-rpc-2.0';
 import fetch from 'node-fetch/index';
 
+interface KeysConfig {
+  ethPrivs: Array<string>;
+  ethAddresses: Array<string>;
+  ckbPrivs: Array<string>;
+  ckbAddresses: Array<string>;
+}
+
 async function generateLockTx(
+  provider: ethers.providers.JsonRpcProvider,
   client: JSONRPCClient,
   ethWallet: ethers.Wallet,
   assetIdent: string,
   nonce: number,
   recipient: string,
   amount: string,
-  ethNodeURL: string,
 ): Promise<string> {
   const lockPayload = {
     sender: ethWallet.address,
@@ -30,8 +39,6 @@ async function generateLockTx(
   };
   const unsignedLockTx = await client.request('generateBridgeInNervosTransaction', lockPayload);
   logger.info('unsignedMintTx', unsignedLockTx);
-
-  const provider = new ethers.providers.JsonRpcProvider(ethNodeURL);
 
   const unsignedTx = unsignedLockTx.rawTransaction;
   unsignedTx.value = unsignedTx.value ? ethers.BigNumber.from(unsignedTx.value.hex) : ethers.BigNumber.from(0);
@@ -66,21 +73,12 @@ async function generateBurnTx(
     amount: amount,
   };
 
-  for (let i = 0; i < 5; i++) {
-    try {
-      const unsignedBurnTx = await client.request('generateBridgeOutNervosTransaction', burnPayload);
-      logger.info('unsignedBurnTx ', unsignedBurnTx);
+  const unsignedBurnTx = await client.request('generateBridgeOutNervosTransaction', burnPayload);
+  logger.info('unsignedBurnTx ', unsignedBurnTx);
 
-      const signedTx = ckb.signTransaction(ckbPriv)(unsignedBurnTx.rawTransaction);
-      logger.info('signedTx', signedTx);
-      return signedTx;
-    } catch (e) {
-      if (i == 4) {
-        throw e;
-      }
-      logger.error('generateBridgeOutNervosTransaction error', e);
-    }
-  }
+  const signedTx = ckb.signTransaction(ckbPriv)(unsignedBurnTx.rawTransaction);
+  logger.info('signedTx', signedTx);
+  return signedTx;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -133,68 +131,73 @@ async function checkTx(client: JSONRPCClient, assetIdent: string, txId: string, 
   }
 }
 
-async function lock(
-  client: JSONRPCClient,
+function lock(
   provider: ethers.providers.JsonRpcProvider,
-  ethWallet: ethers.Wallet,
-  recipients: Array<string>,
-  batchNum: number,
-  ethTokenAddress: string,
-  lockAmount: string,
-  ethNodeURL: string,
-): Promise<Array<string>> {
-  const signedLockTxs = new Array<string>();
-  const lockTxHashes = new Array<string>();
-  const startNonce = await ethWallet.getTransactionCount();
-
-  for (let i = 0; i < batchNum; i++) {
-    const signedLockTx = await generateLockTx(
-      client,
-      ethWallet,
-      ethTokenAddress,
-      startNonce + i,
-      recipients[i],
-      lockAmount,
-      ethNodeURL,
-    );
-    signedLockTxs.push(signedLockTx);
-  }
-
-  for (let i = 0; i < batchNum; i++) {
-    const lockTxHash = (await provider.sendTransaction(signedLockTxs[i])).hash;
-    lockTxHashes.push(lockTxHash);
-  }
-  logger.info('lock txs', lockTxHashes);
-  return lockTxHashes;
-}
-
-async function burn(
-  ckb: CKB,
   client: JSONRPCClient,
-  ckbPrivs: Array<string>,
-  senders: Array<string>,
-  recipient: string,
-  batchNum: number,
+  keys: KeysConfig,
   ethTokenAddress: string,
-  burnAmount: string,
-): Promise<Array<string>> {
-  const burnTxHashes = new Array<string>();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const signedBurnTxs = new Array<any>();
-  for (let i = 0; i < batchNum; i++) {
-    const burnTx = await generateBurnTx(ckb, client, ethTokenAddress, ckbPrivs[i], senders[i], recipient, burnAmount);
-    signedBurnTxs.push(burnTx);
-  }
-
-  for (let i = 0; i < batchNum; i++) {
-    const burnETHTxHash = await ckb.rpc.sendTransaction(signedBurnTxs[i]);
-    burnTxHashes.push(burnETHTxHash);
-  }
-  logger.info('burn txs', burnTxHashes);
-  return burnTxHashes;
+): void {
+  void (async () => {
+    for (;;) {
+      try {
+        for (const ethPrivateKey of keys.ethPrivs) {
+          const wallet = new ethers.Wallet(ethPrivateKey, provider);
+          let nonce = await wallet.getTransactionCount();
+          for (const recipient of keys.ckbAddresses) {
+            const lockAmount = getRandomAmount(1000000000000000, 2000000000000000);
+            const signedLockTx = await generateLockTx(
+              provider,
+              client,
+              wallet,
+              ethTokenAddress,
+              nonce,
+              recipient,
+              lockAmount,
+            );
+            nonce++;
+            const txHash = (await provider.sendTransaction(signedLockTx)).hash;
+            logger.info(`lock send from ${wallet.address} to ${recipient} amount ${lockAmount} txHash ${txHash}`);
+          }
+        }
+      } catch (e) {
+        logger.error('lock error', e);
+      }
+      await asyncSleep(1000 * 60 * 10);
+    }
+  })();
 }
 
-async function check(
+function burn(ckb: CKB, client: JSONRPCClient, keys: KeysConfig, ethTokenAddress: string): void {
+  void (async () => {
+    for (;;) {
+      for (let i = 0; i < keys.ckbPrivs.length; i++) {
+        try {
+          const burnAmount = getRandomAmount(1000000000000000, 2000000000000000);
+          const burnTx = await generateBurnTx(
+            ckb,
+            client,
+            ethTokenAddress,
+            keys.ckbPrivs[i],
+            keys.ckbAddresses[i],
+            keys.ethAddresses[i],
+            burnAmount,
+          );
+          const txHash = await ckb.rpc.sendTransaction(burnTx);
+          logger.info(
+            `burn send from ${keys.ckbAddresses[i]} to ${keys.ethAddresses[i]} amount ${burnAmount} txHash ${txHash}`,
+          );
+        } catch (e) {
+          logger.error('burn tx error', e);
+          await asyncSleep(1000 * 10);
+          continue;
+        }
+      }
+      await asyncSleep(1000 * 60 * 5);
+    }
+  })();
+}
+
+async function _check(
   client: JSONRPCClient,
   txHashes: Array<string>,
   addresses: Array<string>,
@@ -204,6 +207,38 @@ async function check(
   for (let i = 0; i < batchNum; i++) {
     await checkTx(client, ethTokenAddress, txHashes[i], addresses[i]);
   }
+}
+
+function prepareEthPrivateKeys(batchNum: number): Array<string> {
+  const privateKeys = new Array<string>();
+  for (let i = 0; i < batchNum; i++) {
+    privateKeys.push(ethers.Wallet.createRandom().privateKey);
+  }
+  return privateKeys;
+}
+
+async function prepareEthAddresses(
+  provider: ethers.providers.JsonRpcProvider,
+  ethWallet: ethers.Wallet,
+  privateKeys: Array<string>,
+): Promise<Array<string>> {
+  const addresses = new Array<string>();
+  let nonce = await ethWallet.getTransactionCount();
+  for (const key of privateKeys) {
+    const address = new ethers.Wallet(key).address;
+    const tx = await ethWallet.populateTransaction({
+      to: address,
+      value: ethers.constants.WeiPerEther,
+      nonce: nonce,
+    });
+    logger.info('tx', tx);
+    const signedTx = await ethWallet.signTransaction(tx);
+    const lockTxHash = (await provider.sendTransaction(signedTx)).hash;
+    logger.info('prepare eth address tx hash', lockTxHash);
+    addresses.push(address);
+    nonce++;
+  }
+  return addresses;
 }
 
 function prepareCkbPrivateKeys(batchNum: number): Array<string> {
@@ -321,6 +356,12 @@ async function prepareCkbAddresses(
 // const ckbIndexerUrl = 'https://testnet.ckbapp.dev/indexer';
 // const ckbPrivateKey = 'XXX';
 
+function getRandomAmount(min: number, max: number): string {
+  const Range = max - min;
+  const Rand = Math.random();
+  return (min + Math.round(Rand * Range)).toFixed();
+}
+
 export async function ethBatchTest(
   ethPrivateKey: string,
   ckbPrivateKey: string,
@@ -328,12 +369,14 @@ export async function ethBatchTest(
   ckbNodeUrl: string,
   ckbIndexerUrl: string,
   forceBridgeUrl: string,
+  testKeyPath: string,
+  initCkb: boolean,
+  initEth: boolean,
+  send: boolean,
   batchNum = 100,
   ethTokenAddress = '0x0000000000000000000000000000000000000000',
-  lockAmount = '2000000000000000',
-  burnAmount = '1000000000000000',
 ): Promise<void> {
-  logger.info('ethBatchTest start!');
+  logger.info('ethBatchTest start!', ethPrivateKey);
   const ckb = new CKB(ckbNodeUrl);
 
   const client = new JSONRPCClient((jsonRPCRequest) =>
@@ -356,24 +399,62 @@ export async function ethBatchTest(
 
   const provider = new ethers.providers.JsonRpcProvider(ethNodeUrl);
   const ethWallet = new ethers.Wallet(ethPrivateKey, provider);
-  const ethAddress = ethWallet.address;
 
-  const ckbPrivs = await prepareCkbPrivateKeys(batchNum);
-  const ckbAddresses = await prepareCkbAddresses(ckb, ckbPrivs, ckbPrivateKey, batchNum, ckbNodeUrl, ckbIndexerUrl);
-
-  const lockTxs = await lock(
-    client,
-    provider,
-    ethWallet,
-    ckbAddresses,
-    batchNum,
-    ethTokenAddress,
-    lockAmount,
-    ethNodeUrl,
-  );
-  await check(client, lockTxs, ckbAddresses, batchNum, ethTokenAddress);
-
-  const burnTxs = await burn(ckb, client, ckbPrivs, ckbAddresses, ethAddress, batchNum, ethTokenAddress, burnAmount);
-  await check(client, burnTxs, ckbAddresses, batchNum, ethTokenAddress);
+  if (initCkb) {
+    await initCkbAddresses(ckb, ckbPrivateKey, ckbNodeUrl, ckbIndexerUrl, batchNum, testKeyPath);
+  }
+  if (initEth) {
+    await initEthAddresses(provider, ethWallet, batchNum, testKeyPath);
+  }
+  if (send) {
+    sendTx(provider, ckb, client, ethTokenAddress, testKeyPath);
+  }
   logger.info('ethBatchTest pass!');
+}
+
+async function initEthAddresses(
+  provider: ethers.providers.JsonRpcProvider,
+  ethWallet: ethers.Wallet,
+  batchNum: number,
+  testKeyPath: string,
+) {
+  logger.info('initEthAddresses');
+
+  const ethPrivs = prepareEthPrivateKeys(batchNum);
+  const ethAddresses = await prepareEthAddresses(provider, ethWallet, ethPrivs);
+  const keys: KeysConfig = JSON.parse(fs.readFileSync(testKeyPath, 'utf8'));
+  logger.info('keys', keys);
+  keys.ethPrivs = ethPrivs;
+  keys.ethAddresses = ethAddresses;
+  logger.info('keys', keys);
+
+  writeJsonToFile(keys, testKeyPath);
+}
+
+async function initCkbAddresses(
+  ckb: CKB,
+  ckbPrivateKey: string,
+  ckbNodeUrl: string,
+  ckbIndexerUrl: string,
+  batchNum: number,
+  testKeyPath: string,
+) {
+  const ckbPrivs = prepareCkbPrivateKeys(batchNum);
+  const ckbAddresses = await prepareCkbAddresses(ckb, ckbPrivs, ckbPrivateKey, batchNum, ckbNodeUrl, ckbIndexerUrl);
+  const keys: KeysConfig = JSON.parse(fs.readFileSync(testKeyPath, 'utf8'));
+  keys.ckbPrivs = ckbPrivs;
+  keys.ckbAddresses = ckbAddresses;
+  writeJsonToFile(keys, testKeyPath);
+}
+
+function sendTx(
+  provider: ethers.providers.JsonRpcProvider,
+  ckb: CKB,
+  client: JSONRPCClient,
+  ethTokenAddress: string,
+  testKeyPath: string,
+): void {
+  const keys: KeysConfig = JSON.parse(fs.readFileSync(testKeyPath, 'utf8'));
+  void lock(provider, client, keys, ethTokenAddress);
+  void burn(ckb, client, keys, ethTokenAddress);
 }
